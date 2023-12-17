@@ -1,0 +1,164 @@
+# Library imports
+library(lpSolve)
+library(dplyr)
+library(tibble)
+
+# Constants
+call_demand <- c(80, 170, 140, 190, 160, 70, 20)  # Call demand for every 2-hour shift
+demand_eng <- call_demand * 0.8
+demand_spa <- call_demand * 0.2
+ft_capacity <- 24  # Full-time agent capacity (6 calls/hr * 4 hrs)
+pt_capacity <- 24  # Part-time agent capacity (6 calls/hr * 4 hrs)
+hourly_rates <- c(30, 45)  # Hourly rates for full-time and part-time agents
+
+num_shifts <- length(call_demand)
+limited_shifts <- c(4, 5)  # Shifts with limited English-speaking agents
+max_eng_agents <- 1  # Max number of English-speaking agents in limited shifts
+
+# Validate inputs
+validate_inputs <- function(demands, capacities) {
+  if (!all(sapply(demands, is.numeric))) stop("All demands must be numeric vectors.")
+  if (!all(sapply(capacities, is.numeric))) stop("All capacities must be numeric.")
+  if (any(unlist(demands) < 0)) stop("Demands must be non-negative.")
+  if (any(unlist(capacities) <= 0)) stop("Capacities must be positive.")
+}
+
+# Function to calculate optimal staffing
+calculate_optimal_staffing <- function(demand_eng, demand_spa, ft_capacity, pt_capacity, rates, limited_shifts, max_eng_agents) {
+  validate_inputs(list(demand_eng, demand_spa), list(ft_capacity, pt_capacity))
+  
+  total_agents <- num_shifts * 4  # Two types (FT/PT) for both languages
+  objective <- c(rep(rates[1], num_shifts * 2), rep(rates[2], num_shifts * 2))
+  
+  # Constraint matrix for language-specific agents
+  constraints <- matrix(0, nrow = num_shifts * 2, ncol = total_agents)
+  for (i in 1:num_shifts) {
+    constraints[i, c(i, i + num_shifts * 2)] <- 1  # English-speaking agents
+    constraints[i + num_shifts, c(i + num_shifts, i + num_shifts * 3)] <- 1  # Spanish-speaking agents
+    
+    # Limited availability constraint
+    if (i %in% limited_shifts) {
+      constraints[i, i] <- max_eng_agents
+    }
+  }
+  
+  directions <- rep(">=", num_shifts * 2)
+  rhs <- c(demand_eng, demand_spa)
+  
+  # Solve the LP problem
+  solution <- lp("min", objective, constraints, directions, rhs)
+  if (solution$status != 0) stop("Optimization problem could not be solved")
+  
+  # Extract and return results
+  ft_agents_eng <- solution$solution[1:num_shifts]
+  pt_agents_eng <- solution$solution[(num_shifts * 2 + 1):(num_shifts * 3)]
+  ft_agents_spa <- solution$solution[(num_shifts + 1):(num_shifts * 2)]
+  pt_agents_spa <- solution$solution[(num_shifts * 3 + 1):(num_shifts * 4)]
+  
+  total_cost_eng <- sum(ft_agents_eng * hourly_rates[1] * 4) + sum(pt_agents_eng * hourly_rates[2] * 4)
+  total_cost_spa <- sum(ft_agents_spa * hourly_rates[1] * 4) + sum(pt_agents_spa * hourly_rates[2] * 4)
+  
+  return(list(FullTimeAgentsEng = ft_agents_eng, PartTimeAgentsEng = pt_agents_eng,
+              FullTimeAgentsSpa = ft_agents_spa, PartTimeAgentsSpa = pt_agents_spa,
+              TotalCost = total_cost_eng + total_cost_spa))
+}
+
+# Adjusted Demand for Scenario with Limited Shifts
+adjusted_demand_eng <- demand_eng
+# Reducing demand for English-speaking agents in limited shifts
+adjusted_demand_eng[limited_shifts] <- pmin(adjusted_demand_eng[limited_shifts], max_eng_agents * ft_capacity)
+
+# Bilingual Demand
+# Assuming bilingual agents can handle both English and Spanish calls
+bilingual_demand <- demand_eng + demand_spa
+
+# Apply to scenarios
+standard_staffing <- calculate_optimal_staffing(demand_eng, demand_spa, ft_capacity, pt_capacity, hourly_rates, limited_shifts, max_eng_agents)
+adjusted_staffing <- calculate_optimal_staffing(adjusted_demand_eng, demand_spa, ft_capacity, pt_capacity, hourly_rates, limited_shifts, max_eng_agents)
+bilingual_staffing <- calculate_optimal_staffing(bilingual_demand, rep(0, num_shifts), ft_capacity, pt_capacity, hourly_rates, limited_shifts, max_eng_agents)
+
+# Create a table for each scenario's results with language differentiation
+standard_table <- tibble(
+  Scenario = "Standard",
+  FullTimeAgentsEng = standard_staffing$FullTimeAgentsEng,
+  PartTimeAgentsEng = standard_staffing$PartTimeAgentsEng,
+  FullTimeAgentsSpa = standard_staffing$FullTimeAgentsSpa,
+  PartTimeAgentsSpa = standard_staffing$PartTimeAgentsSpa,
+  TotalCost = standard_staffing$TotalCost
+)
+
+adjusted_table <- tibble(
+  Scenario = "Adjusted",
+  FullTimeAgentsEng = adjusted_staffing$FullTimeAgentsEng,
+  PartTimeAgentsEng = adjusted_staffing$PartTimeAgentsEng,
+  FullTimeAgentsSpa = adjusted_staffing$FullTimeAgentsSpa,
+  PartTimeAgentsSpa = adjusted_staffing$PartTimeAgentsSpa,
+  TotalCost = adjusted_staffing$TotalCost
+)
+
+bilingual_table <- tibble(
+  Scenario = "Bilingual",
+  FullTimeAgentsEng = bilingual_staffing$FullTimeAgentsEng,
+  PartTimeAgentsEng = bilingual_staffing$PartTimeAgentsEng,
+  FullTimeAgentsSpa = bilingual_staffing$FullTimeAgentsSpa,
+  PartTimeAgentsSpa = bilingual_staffing$PartTimeAgentsSpa,
+  TotalCost = bilingual_staffing$TotalCost
+)
+
+standard_cost <- standard_staffing$TotalCost
+bilingual_cost <- bilingual_staffing$TotalCost
+
+# Function to calculate the maximum wage increase percentage for bilingual agents
+calculate_max_wage_increase_percentage <- function(standard_cost, bilingual_cost) {
+  if (is.null(bilingual_cost) || length(bilingual_cost) == 0) {
+    warning("Bilingual cost is not defined or has no elements.")
+    return(NA)
+  }
+  if (bilingual_cost == 0) {
+    warning("Bilingual cost is zero; cannot calculate wage increase.")
+    return(NA)
+  }
+  return(((standard_cost - bilingual_cost) / bilingual_cost) * 100)
+}
+
+# Calculate the maximum wage increase percentage
+max_increase_percentage <- calculate_max_wage_increase_percentage(
+  standard_staffing$TotalCost, 
+  bilingual_staffing$TotalCost
+)
+
+# Adding max wage increase as a separate row
+options(tibble.width = Inf)
+max_wage_increase_row <- tibble(
+  Scenario = "Max Wage Increase (%)",
+  FullTimeAgentsEng = NA,
+  PartTimeAgentsEng = NA,
+  FullTimeAgentsSpa = NA,
+  PartTimeAgentsSpa = NA,
+  TotalCost = max_increase_percentage
+)
+
+# Combine and print the results
+final_results <- bind_rows(standard_table, adjusted_table, bilingual_table, max_wage_increase_row)
+options(tibble.width = Inf)
+print(final_results, n = 22)
+
+# Aggregate the results for concise presentation with language differentiation
+aggregate_results <- function(result_table) {
+  result_table %>%
+    group_by(Scenario) %>%
+    summarize(
+      AveFTAgentsEng = mean(FullTimeAgentsEng, na.rm = TRUE),
+      AvePTAgentsEng = mean(PartTimeAgentsEng, na.rm = TRUE),
+      AveFTAgentsSpa = mean(FullTimeAgentsSpa, na.rm = TRUE),
+      AvePTAgentsSpa = mean(PartTimeAgentsSpa, na.rm = TRUE),
+      TotalCost = unique(TotalCost)
+    )
+}
+
+# Applying the updated aggregation function to the final results
+final_aggregated_results <- aggregate_results(final_results)
+
+# Print the aggregated results
+options(tibble.width = Inf)
+print(final_aggregated_results)
